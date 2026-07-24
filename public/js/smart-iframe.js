@@ -41,9 +41,9 @@ export function markCanonical() {
   // Listen for adoption requests from nested instances.
   window.addEventListener("message", (e) => {
     if (e.data && e.data.type === "lux:adopt" && e.data.url) {
-      // Hand it to the main app's navigate function if present.
-      if (window.Lux && window.Lux.navigate) {
-        window.Lux.navigate(e.data.url);
+      // Hand it to the main app's navigate function.
+      if (window.__luxNavigate) {
+        window.__luxNavigate(e.data.url);
       }
       e.preventDefault();
     }

@@ -4,6 +4,7 @@
 // Wrong password: shake + red reset button to clear password and start fresh.
 
 import { loadSettings, saveSettings } from "./settings.js";
+import { setVaultPassphrase, clearVaultKey } from "./vault.js";
 
 const SESSION_KEY = "lux.session.unlocked";
 let idleTimer = null;
@@ -26,13 +27,17 @@ export function lock() {
   try {
     sessionStorage.removeItem(SESSION_KEY);
   } catch {}
+  clearVaultKey();
   document.body.classList.add("lux-locked");
   window.dispatchEvent(new CustomEvent("lux:lock-change", { detail: { locked: true } }));
 }
 
 export function dismiss() {
-  $("lockscreen").style.display = "none";
-  document.body.classList.remove("lux-locked");
+  // Fade out the lock screen before hiding it.
+  document.body.classList.add("lux-unlocking");
+  setTimeout(() => {
+    document.body.classList.remove("lux-locked", "lux-unlocking");
+  }, 300);
   // Set session key so navigation guard passes (lock is dismissed for this session).
   try {
     sessionStorage.setItem(SESSION_KEY, "1");
@@ -44,6 +49,7 @@ export async function tryUnlock(phrase) {
   const stored = s.lockPassword;
   // No password set means anyone can unlock — treat as match.
   if (!stored) {
+    setVaultPassphrase("");
     try { sessionStorage.setItem(SESSION_KEY, "1"); } catch {}
     dismiss();
     armIdle();
@@ -53,6 +59,7 @@ export async function tryUnlock(phrase) {
   // Compare SHA-256 hash, not plaintext.
   const hash = await sha256(phrase);
   if (hash === stored) {
+    setVaultPassphrase(phrase);
     try { sessionStorage.setItem(SESSION_KEY, "1"); } catch {}
     dismiss();
     armIdle();
@@ -91,7 +98,6 @@ export function initLock() {
 
   // Cold start — show lock screen.
   document.body.classList.add("lux-locked");
-  $("lockscreen").style.display = "flex";
   input.value = "";
   msg.textContent = "";
   resetBtn.style.display = "none";
@@ -130,10 +136,11 @@ export function initLock() {
     input.placeholder = "Enter password";
     skipBtn.style.display = "none";
 
-    const doUnlock = () => {
+    const doUnlock = async () => {
       const val = input.value;
       if (!val) return;
-      if (tryUnlock(val)) {
+      const ok = await tryUnlock(val);
+      if (ok) {
         msg.textContent = "";
         resetBtn.style.display = "none";
       } else {
@@ -160,13 +167,15 @@ export function initLock() {
       input.placeholder = "Create a password";
       skipBtn.style.display = "flex";
       // Re-bind for create mode.
-      const doCreate = () => {
+      const doCreate = async () => {
         const val = input.value.trim();
         if (!val) {
           msg.textContent = "Enter a phrase.";
           return;
         }
-        saveSettings({ lockPassword: val });
+        // Store SHA-256 hash, matching the first-visit flow.
+        const hash = await sha256(val);
+        saveSettings({ lockPassword: hash });
         msg.textContent = "";
         tryUnlock(val);
       };

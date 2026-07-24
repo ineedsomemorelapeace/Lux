@@ -9,7 +9,7 @@
 <link rel="preload" href="/assets/lora-700-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/css/styles.css">
 </head>
-<body data-theme="light" data-bg="dots" data-chrome="macos">
+<body class="lux-locked" data-theme="light" data-bg="dots" data-chrome="macos">
   <div id="dots"></div>
   <canvas id="sky"></canvas>
 
@@ -57,12 +57,16 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
       </button>
       <div id="toolbar-url-wrap">
+        <img id="toolbar-fav" class="toolbar-fav" src="" alt="" style="display:none">
         <input id="toolbar-url" type="text" autocomplete="off" spellcheck="false" placeholder="Search or enter URL">
         <button class="toolbar-info" id="incognito-btn" aria-label="Incognito" title="Incognito">&#128737;</button>
       </div>
       <button class="toolbar-btn" id="nav-new" aria-label="New tab">+</button>
       <button class="toolbar-btn" id="nav-close" aria-label="Close">&#10005;</button>
     </div>
+
+    <!-- Loading progress bar -->
+    <div id="loading-bar"><div class="bar-fill"></div><span class="load-msg">Page seems stuck — try reloading</span></div>
 
     <!-- Viewport: iframes + new-tab page -->
     <div id="tab-viewport">
@@ -106,6 +110,9 @@
       </div>
       <div id="taskbar-center"><span class="task-label"></span></div>
       <div id="taskbar-right">
+        <button class="taskbar-icon" id="hide-taskbar" aria-label="Hide taskbar" title="Hide taskbar (Ctrl+G to restore)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
         <button class="taskbar-icon" id="open-settings" aria-label="Settings">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
@@ -200,11 +207,19 @@
   </div>
 
   <div id="help-tip">
-    <b>Tips</b><br>
-    Type a URL or search, press enter.<br>
-    <span class="kbd">`</span> panic key jumps to a decoy.<br>
-    Cloak opens the session hidden in an about:blank window.<br>
-    Settings in the taskbar.
+    <b>Shortcuts</b><br>
+    <span class="kbd">Ctrl+T</span> New tab<br>
+    <span class="kbd">Ctrl+W</span> Close tab<br>
+    <span class="kbd">Ctrl+Tab</span> Next tab<br>
+    <span class="kbd">Ctrl+G</span> Show taskbar<br>
+    <span class="kbd">Ctrl+Shift+O</span> Open cloaked<br>
+    <span class="kbd">`</span> Panic key (decoy)<br>
+    <span class="kbd">Esc</span> Close panel<br>
+    <span class="kbd">Ctrl+Ctrl</span> Flash real URL<br>
+    <br><b>Tips</b><br>
+    ↓ arrow hides taskbar completely.<br>
+    Privacy guard blocks site tracking.<br>
+    Double-ctrl reveals the true URL.
   </div>
 
   <div id="ip-badge"></div>

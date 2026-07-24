@@ -10,7 +10,7 @@ import { markCanonical, breakOutOfNest } from "./smart-iframe.js";
 import { applyGoogleOptOut } from "./extensions.js";
 import * as kill from "./kill-switch.js";
 import { openCloaked, armPanicKey, enableAntiClose } from "./cloak.js";
-import { initVault, saveNote, listVault, openVaultItem, deleteVaultItem } from "./vault.js";
+import { initVault, saveNote, listVault, openVaultItem, deleteVaultItem, importFile } from "./vault.js";
 import { armPrimeOnFirstGesture } from "./popup-perm.js";
 import { initInfoPanel } from "./info.js";
 import { initDevtools, show as showDevtools, hide as hideDevtools } from "./devtools.js";
@@ -70,6 +70,11 @@ async function boot() {
   initKeyboardShortcuts();
   containerAutoHide();
 
+  // Panic key: instantly replace the page with a decoy site.
+  armPanicKey({ key: settings.panicKey, decoy: settings.panicDecoy });
+  // Anti-close: warn before the tab/window is closed.
+  if (settings.antiClose) enableAntiClose();
+
   // If the saved engine is Scramjet, register its SW + init the controller
   // NOW (at boot), not lazily on first navigate. The SJ SW needs to install,
   // activate, and claim the page before any navigation happens — this is the
@@ -87,6 +92,14 @@ async function boot() {
   // Expose for games.js and other modules to trigger navigation
   window.__luxNavigate = navigate;
   window.__luxTabs = Tabs;
+
+  // Sync privacy guard setting to the SW once it's ready.
+  if (navigator.serviceWorker) {
+    navigator.serviceWorker.ready.then(syncPrivacyGuardToSW).catch(() => {});
+  }
+
+  // New-tab page greeting.
+  updateGreeting();
 
   if (hashTarget) navigate(hashTarget);
 }
@@ -121,7 +134,19 @@ async function initScramjetEarly() {
   }
 }
 
-// ── Background ───────────────────────────────────────────────────────────
+// ── Privacy Guard → SW sync ───────────────────────────────────────────────
+
+function syncPrivacyGuardToSW() {
+  const s = loadSettings();
+  if (navigator.serviceWorker?.controller) {
+    navigator.serviceWorker.controller.postMessage({
+      type: "lux:settings",
+      privacyGuard: !!s.privacyGuard,
+    });
+  }
+}
+
+// ── Background ────────────────────────────────────────────────────────────
 
 function initBackground() {
   const canvas = $("sky");
@@ -163,6 +188,11 @@ function initBackground() {
   function start() { if (settings.background !== "stars") return; resize(); if (!raf) draw(); }
   function stop() { if (raf) { cancelAnimationFrame(raf); raf = null; } }
   addEventListener("resize", () => { canvas.width = innerWidth; canvas.height = innerHeight; });
+  // Pause animation when tab is hidden (perf).
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stop();
+    else if (settings.background === "stars") start();
+  });
   start();
   window.addEventListener("lux:settings", (e) => {
     Object.assign(settings, e.detail);
@@ -209,9 +239,12 @@ function initToolbar() {
   Tabs.on("tabUpdated", updateNavButtons);
 
   // Toolbar URL = omnibox
-  $("toolbar-url").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); navigate($("toolbar-url").value.trim()); }
+  const urlInput = $("toolbar-url");
+  urlInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); navigate(urlInput.value.trim()); }
   });
+  // Select all on focus (standard browser UX).
+  urlInput.addEventListener("focus", () => { setTimeout(() => urlInput.select(), 0); });
 
   // New-tab page URL input
   const ntUrl = $("nt-url");
@@ -273,8 +306,10 @@ function renderTabStrip() {
     el.dataset.tabId = String(t.id);
     el.draggable = true;
     el.title = t.title || t.url || "";
-    const fav = t.favicon ? "<img class=\"tab-fav\" src=\"" + t.favicon + "\" alt=\"\">" : "";
-    el.innerHTML = fav + "<span class=\"tab-title\">" + escapeHtml(t.title || t.url || "New Tab") + "</span><button class=\"tab-close\">&times;</button>";
+    const icon = t.loading
+      ? "<span class=\"tab-spinner\"></span>"
+      : (t.favicon ? "<img class=\"tab-fav\" src=\"" + t.favicon + "\" alt=\"\">" : "");
+    el.innerHTML = icon + "<span class=\"tab-title\">" + escapeHtml(t.title || t.url || "New Tab") + "</span><button class=\"tab-close\">&times;</button>";
     el.querySelector(".tab-close").onclick = (e) => { e.stopPropagation(); Tabs.closeTab(t.id); };
     el.onclick = () => { Tabs.activateTab(t.id); };
     el.onauxclick = (e) => { if (e.button === 1) Tabs.closeTab(t.id); };
@@ -287,6 +322,7 @@ function renderTabStrip() {
       const fromId = parseInt(e.dataTransfer.getData("text/plain"));
       if (fromId && fromId !== t.id) { Tabs.reorderTabs(fromId, t.id); }
     };
+    strip.appendChild(el);
   }
   const plus = document.createElement("button");
   plus.className = "tab-new";
@@ -308,9 +344,21 @@ function initTabStrip() {
     if (el) el.textContent = title;
   }
 
+  function updateToolbarFav(tab) {
+    const fav = $("toolbar-fav");
+    if (!fav) return;
+    if (tab && tab.favicon) {
+      fav.src = tab.favicon;
+      fav.style.display = "block";
+    } else {
+      fav.style.display = "none";
+    }
+  }
+
   Tabs.on("tabActivated", (tab) => {
     renderTabStrip();
     updateBrowserTitle(tab);
+    updateToolbarFav(tab);
     if (tab && tab.url) {
       $("toolbar-url").value = tab.url;
       onStageOpened();
@@ -318,13 +366,38 @@ function initTabStrip() {
   });
   Tabs.on("tabUpdated", (tab) => {
     updateBrowserTitle(tab);
+    if (tab && tab.id === Tabs.getActiveTab()?.id) updateToolbarFav(tab);
   });
   Tabs.on("tabUpdated", (tab) => {
     renderTabStrip();
     if (!tab.loading && window.__luxToolbar) {
       window.__luxToolbar.showReload();
+      hideLoadingBar();
     }
   });
+}
+
+// ── Loading Bar ────────────────────────────────────────────────────────────
+
+let loadStuckTimer = null;
+
+function showLoadingBar() {
+  const bar = $("loading-bar");
+  if (!bar) return;
+  bar.classList.add("active");
+  bar.classList.remove("stuck");
+  // If still loading after 8s, mark as stuck.
+  clearTimeout(loadStuckTimer);
+  loadStuckTimer = setTimeout(() => {
+    if (bar.classList.contains("active")) bar.classList.add("stuck");
+  }, 8000);
+}
+
+function hideLoadingBar() {
+  const bar = $("loading-bar");
+  if (!bar) return;
+  clearTimeout(loadStuckTimer);
+  bar.classList.remove("active", "stuck");
 }
 
 // ── Navigation ───────────────────────────────────────────────────────────
@@ -349,6 +422,7 @@ function navigate(input) {
   Tabs.navigateTab(tab.id, url, true);
   $("toolbar-url").value = url;
   setStatus("Loading...");
+  showLoadingBar();
   if (window.__luxToolbar) window.__luxToolbar.showStop();
   onStageOpened();
   // Check if this site is better supported by Scramjet.
@@ -490,6 +564,18 @@ function initTaskbar() {
             hdr.style.cssText = "display:flex;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);";
             const imp = document.createElement("button");
             imp.className = "btn"; imp.textContent = "Import";
+            imp.onclick = () => {
+              const input = document.createElement("input");
+              input.type = "file";
+              input.multiple = true;
+              input.onchange = async () => {
+                for (const file of input.files) {
+                  try { await importFile(file); } catch (e) { setStatus(e.message, true); }
+                }
+                render();
+              };
+              input.click();
+            };
             hdr.appendChild(imp);
             const body = document.createElement("div");
             body.style.cssText = "flex:1;display:flex;flex-direction:column;overflow:hidden;";
@@ -515,6 +601,7 @@ function initTaskbar() {
   });
 
   // Settings/docs still open as overlays
+  $("hide-taskbar").onclick = () => { document.body.classList.add("taskbar-manual-hide"); };
   $("open-settings").onclick = () => $("settings").classList.add("open");
   $("open-docs").onclick = () => {
     launchApp("docs", (id) => {
@@ -595,11 +682,38 @@ function initKeyboardShortcuts() {
       const settings = $("settings");
       if (settings?.classList.contains("open")) settings.classList.remove("open");
     }
+    // Ctrl+Shift+O: open current URL in a cloaked about:blank popup
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === "O") {
+      e.preventDefault();
+      const url = Tabs.getActiveTab()?.url;
+      if (url) openCloakedTarget(url);
+    }
+    // Ctrl+G: restore hidden taskbar
+    if ((e.ctrlKey || e.metaKey) && e.key === "g") {
+      e.preventDefault();
+      document.body.classList.remove("taskbar-manual-hide");
+    }
   });
 }
 
 function containerAutoHide() {
   document.body.dataset.taskbarHide = String(loadSettings().taskbarHide || false);
+}
+
+// ── New Tab Greeting ───────────────────────────────────────────────────────
+
+function updateGreeting() {
+  const el = $("title");
+  if (!el) return;
+  const h = new Date().getHours();
+  const greeting = h < 6 ? "Good night" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+  el.textContent = greeting;
+  // Subtle: update every minute in case the user leaves the tab open.
+  setInterval(() => {
+    const nh = new Date().getHours();
+    const ng = nh < 6 ? "Good night" : nh < 12 ? "Good morning" : nh < 18 ? "Good afternoon" : "Good evening";
+    if (el.textContent !== ng) el.textContent = ng;
+  }, 60000);
 }
 
 // ── Clock ─────────────────────────────────────────────────────────────────
@@ -712,7 +826,7 @@ function buildSettingsUi(s) {
     row("Search engine", sel("searchEngine", listSearchEngines().map((e) => ({ v: e.id, t: e.label })))) +
     "</div>" +
     "<div class=\"group\">" +
-    row("URL scheme", sel("urlScheme", [{ v: "encoded", t: "Obfuscated" }, { v: "plain", t: "Plain" }, { v: "math", t: "Math disguise" }, { v: "none", t: "No URL" }])) +
+    row("URL scheme", sel("urlScheme", [{ v: "encoded", t: "Obfuscated" }, { v: "plain", t: "Plain" }, { v: "none", t: "No URL" }])) +
     row("Theme", sel("theme", [{ v: "light", t: "Light" }, { v: "dark", t: "Dark" }])) +
     row("Background", sel("background", [{ v: "dots", t: "Dots" }, { v: "stars", t: "Night sky" }, { v: "none", t: "None" }])) +
     row("Auto-hide taskbar", toggle("taskbarHide")) +
@@ -726,6 +840,7 @@ function buildSettingsUi(s) {
     "<div class=\"group\">" +
     row("Clear tracking params (ClearURLs)", toggle("clearUrls")) +
     row("Ad / element blocker", toggle("adBlock")) +
+    row("Privacy guard (block tracking)", toggle("privacyGuard")) +
     // Note: "Site event handling" toggle removed — it can't be injected into
     // cross-origin proxied frames. The ad-blocker + cosmetic CSS in the SW
     // handles the practical cases.
@@ -752,6 +867,7 @@ function buildSettingsUi(s) {
       applySettingsToDom(next);
       if (el.dataset.key === "taskbarHide") document.body.dataset.taskbarHide = String(val);
       if (el.dataset.key === "devtools") { if (val) showDevtools(); else hideDevtools(); }
+      if (el.dataset.key === "privacyGuard") syncPrivacyGuardToSW();
     });
   });
 }

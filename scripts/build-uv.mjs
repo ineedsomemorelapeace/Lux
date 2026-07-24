@@ -92,11 +92,24 @@ if (existsSync(uvSwPath)) {
       .replace(/^export\s+/gm, "")
       .replace(/^\/\/.*$/gm, ""); // strip comments for compactness
 
+    // Read the privacy guard script (injected into proxied pages when enabled).
+    const pgSrc = await readFile(join(root, "public/data/privacy-guard.js"), "utf8");
+
     const wiring =
       'importScripts("/uv/uv.bundle.js", "/uv/uv.config.js");\n' +
       "// === Ad-block filter data (inlined from data/filters.js) ===\n" +
       filtersInlined +
       "// === End filter data ===\n\n" +
+      "// === Privacy Guard script (inlined from data/privacy-guard.js) ===\n" +
+      "var _privacyGuardScript = " + JSON.stringify(pgSrc) + ";\n" +
+      "var _privacyGuardEnabled = true;\n" +
+      "// Receive settings updates from the main page.\n" +
+      "self.addEventListener('message', function(e) {\n" +
+      "  if (e.data && e.data.type === 'lux:settings') {\n" +
+      "    if (typeof e.data.privacyGuard === 'boolean') _privacyGuardEnabled = e.data.privacyGuard;\n" +
+      "  }\n" +
+      "});\n" +
+      "// === End privacy guard ===\n\n" +
       swSrc +
       '\n// Wire the fetch handler (appended by build-uv.mjs).\n' +
       '// Includes ad-blocking: drops requests to known ad hosts and injects\n' +
@@ -144,12 +157,15 @@ if (existsSync(uvSwPath)) {
       '  }\n' +
       '  // 204 No Content or other null-body statuses: return as-is.\n' +
       '  if (resp.status === 204 || resp.status === 304 || !resp.body) return resp;\n' +
-      '  // Apply cosmetic CSS for HTML responses.\n' +
+      '  // Apply cosmetic CSS + privacy guard for HTML responses.\n' +
       '  if (!ct.includes("text/html")) return resp;\n' +
-      '  const css = "<style>" + cosmeticCss() + "</style>";\n' +
+      '  var inject = "<style>" + cosmeticCss() + "</style>";\n' +
+      '  if (_privacyGuardEnabled) {\n' +
+      '    inject += "<script>" + _privacyGuardScript + "<\\/script>";\n' +
+      '  }\n' +
       '  try {\n' +
       '    const body = await resp.text();\n' +
-      '    const injected = body.replace("<head>", "<head>" + css) || (css + body);\n' +
+      '    const injected = body.replace("<head>", "<head>" + inject) || (inject + body);\n' +
       '    return new Response(injected, {\n' +
       '      status: resp.status, statusText: resp.statusText,\n' +
       '      headers: resp.headers,\n' +

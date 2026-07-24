@@ -29,6 +29,8 @@ function scan(containerEl) {
     // Find all iframes within the container (nested ones included).
     const frames = containerEl.querySelectorAll("iframe");
     for (const f of frames) {
+      // Skip Lux's own tab iframes — they are not "nested" content.
+      if (f.classList.contains("lux-tab-frame")) continue;
       const src = f.src || "";
       if (!src || src === "about:blank") continue;
       if (knownSrcs.has(src)) continue;
@@ -36,8 +38,8 @@ function scan(containerEl) {
       // Only surface if it looks like a real content frame (has dimensions).
       const rect = f.getBoundingClientRect();
       if (rect.width < 50 || rect.height < 50) continue;
-      // Skip Scramjet-managed and proxy frames.
-      if (src.includes("/~/sj/") || src.includes("/scramjet/") || src.includes("/sj-proxy?")) continue;
+      // Skip proxy frames (UV /s/, Scramjet, sj-proxy fallback).
+      if (src.includes("/s/") || src.includes("/~/sj/") || src.includes("/scramjet/") || src.includes("/sj-proxy?")) continue;
       if (onNestedCallback) onNestedCallback(src);
     }
   } catch {

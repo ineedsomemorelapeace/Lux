@@ -181,13 +181,11 @@ export function reloadTab(id) {
   catch { if (tab.iframe.src && tab.iframe.src !== "about:blank") tab.iframe.src = tab.iframe.src; }
 }
 
-// Sync the toolbar URL input + crumb from the active tab.
+// Sync the toolbar URL input from the active tab.
 function syncToolbarFromTab(tab) {
   if (!tab) return;
   const urlInput = document.getElementById("toolbar-url");
   if (urlInput) urlInput.value = tab.url || "";
-  const crumb = document.getElementById("stage-crumb");
-  if (crumb) crumb.textContent = safeHostname(tab.url);
 }
 
 function safeHostname(url) {

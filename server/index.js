@@ -1,4 +1,4 @@
-// ProxyForge server.
+// Lux server.
 //
 // Architecture:
 //   1. Express serves the static front-end from public/.
@@ -22,7 +22,7 @@ import { createServer } from "node:http";
 import { server as wisp, logging as wispLogging } from "@mercuryworkshop/wisp-js/server";
 import { statsJson, statsSse, userConnected, userDisconnected } from "./stats.js";
 import { config } from "./config.js";
-import { createSession, verifySession, sessionExists } from "./sessions.js";
+import { createSession, sessionExists } from "./sessions.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = dirname(__dirname);
@@ -48,6 +48,11 @@ const app = express();
 // In shared mode, gate every request behind a session cookie. The login page
 // and the session-create endpoint are exempt. In single mode, no auth.
 const MODE = config.mode || "single";
+if (MODE === "shared" && !config.masterPassword) {
+  console.error("\n  FATAL: shared mode requires a master password.");
+  console.error("  Set LUX_MASTER_PASSWORD env var or add masterPassword to config.local.js.\n");
+  process.exit(1);
+}
 if (MODE === "shared") {
   app.use((req, res, next) => {
     // Exempt the login page and the API endpoints.
@@ -102,18 +107,18 @@ app.use((req, res, next) => {
     }
     res.on("close", () => {
       // Delay disconnect so rapid navigations within a session don't flap.
+      // 30s is long enough to cover multi-asset page loads and short enough
+      // to reflect genuine departures within a minute.
       setTimeout(() => {
         if (countedSessions.has(key)) {
           countedSessions.delete(key);
           userDisconnected(host);
         }
-      }, 5000);
+      }, 30000);
     });
   }
   next();
 });
-
-// (parseCookie is defined above in the session-auth section — reuse it.)
 
 // Static mounts. Order matters: the SW scope root must be able to fetch these.
 // The bare-mux worker is fetched with strict same-origin expectations, so each
@@ -147,16 +152,6 @@ app.use("/cloak", express.static(join(publicDir, "cloak"), transportStaticOption
 // Served with correct MIME for .wasm/.js cores.
 app.use("/webretro", express.static(join(publicDir, "webretro"), transportStaticOptions));
 app.use("/css", express.static(join(publicDir, "css"), transportStaticOptions));
-// TipTap and other npm packages for the rich text editor.
-const npmDir = join(root, "node_modules");
-app.use("/npm", express.static(npmDir, {
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith(".mjs") || filePath.endsWith(".js")) res.type("text/javascript");
-    else if (filePath.endsWith(".wasm")) res.type("application/wasm");
-    else if (filePath.endsWith(".css")) res.type("text/css");
-  },
-  fallthrough: false,
-}));
 app.use("/js", express.static(join(publicDir, "js"), transportStaticOptions));
 app.use("/data", express.static(join(publicDir, "data"), transportStaticOptions));
 app.use("/assets", express.static(join(publicDir, "assets"), { fallthrough: false }));
@@ -235,69 +230,55 @@ If you believe this is an error, please contact the site owner.</p>
 <a href="/">Return to Lux</a>
 </div></body></html>`;
 
-// Scramjet proxy endpoint: fetches a URL on the server side and returns
-// the response. The iframe is pointed directly at this endpoint, so the
-// HTML is rendered with a <base> tag to fix relative URL resolution.
-app.get("/sj-proxy", async (req, res) => {
-  const target = req.query.url;
-  if (!target || typeof target !== "string") {
-    return res.status(400).type("html").send(PAGE_NOT_FOUND);
-  }
-  if (!target.startsWith("http://") && !target.startsWith("https://")) {
-    return res.status(400).type("html").send(PAGE_NOT_FOUND);
-  }
-  try {
-    const resp = await fetch(target, {
-      headers: { "User-Agent": req.headers["user-agent"] || "" },
-      redirect: "follow",
-    });
-    res.status(resp.status);
-    for (const [k, v] of resp.headers) {
-      const lk = k.toLowerCase();
-      if (["transfer-encoding", "connection", "keep-alive", "content-security-policy",
-           "content-encoding", "content-length"].includes(lk)) continue;
-      res.setHeader(k, v);
-    }
-    const ct = resp.headers.get("content-type") || "";
-    const buf = Buffer.from(await resp.arrayBuffer());
-    if (ct.includes("text/html")) {
-      let html = buf.toString("utf8");
-      html = html.replace("<head>", `<head><base href="${target}">`);
-      res.setHeader("content-length", Buffer.byteLength(html));
-      return res.send(html);
-    }
-    res.send(buf);
-  } catch (e) {
-    // Return clean 404 page with error detail for debugging
-    const withError = PAGE_NOT_FOUND.replace(
-      "</p>",
-      `</p><div class="detail">${e.message.replace(/</g,"&lt;")}</div>`
-    );
-    res.status(502).type("html").send(withError);
-  }
-});
+// ---- Server-side proxy helper ----
+// Shared logic for /sj-proxy and /api/tv-proxy. Fetches a URL server-side,
+// strips dangerous headers, injects a <base> tag for relative URL resolution.
+// Security: blocks private/internal IPs (SSRF) and HTML-escapes the base href.
 
-// TV proxy endpoint: mirrors /sj-proxy pattern. Fetches a URL on the server
-// side, strips dangerous headers, injects <base> tag, returns the response.
-// Supports header mapping: x-cookie -> cookie, x-referer -> referer.
-app.get("/api/tv-proxy", async (req, res) => {
+function isPrivateHost(hostname) {
+  // Block access to private/internal ranges to prevent SSRF.
+  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return true;
+  if (hostname === "0.0.0.0") return true;
+  // Link-local / cloud metadata.
+  if (hostname === "169.254.169.254" || hostname.startsWith("169.254.")) return true;
+  // Private IPv4 ranges.
+  if (/^10\./.test(hostname)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(hostname)) return true;
+  if (/^192\.168\./.test(hostname)) return true;
+  // IPv6 private/link-local.
+  if (hostname.startsWith("fc") || hostname.startsWith("fd")) return true;
+  if (hostname.startsWith("fe80")) return true;
+  return false;
+}
+
+function escapeAttr(s) {
+  return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function proxyFetch(req, res, { allowHeaders = false } = {}) {
   const target = req.query.url;
   if (!target || typeof target !== "string") {
     return res.status(400).type("html").send(PAGE_NOT_FOUND);
   }
   if (!target.startsWith("http://") && !target.startsWith("https://")) {
+    return res.status(400).type("html").send(PAGE_NOT_FOUND);
+  }
+  // SSRF guard: block private/internal destinations.
+  try {
+    const parsed = new URL(target);
+    if (isPrivateHost(parsed.hostname)) {
+      return res.status(403).type("html").send(PAGE_NOT_FOUND);
+    }
+  } catch {
     return res.status(400).type("html").send(PAGE_NOT_FOUND);
   }
   try {
     const fetchHeaders = { "User-Agent": req.headers["user-agent"] || "" };
-    // Map x-* headers to their real equivalents
-    if (req.headers["x-cookie"]) fetchHeaders.cookie = req.headers["x-cookie"];
-    if (req.headers["x-referer"]) fetchHeaders.referer = req.headers["x-referer"];
-
-    const resp = await fetch(target, {
-      headers: fetchHeaders,
-      redirect: "follow",
-    });
+    if (allowHeaders) {
+      if (req.headers["x-cookie"]) fetchHeaders.cookie = req.headers["x-cookie"];
+      if (req.headers["x-referer"]) fetchHeaders.referer = req.headers["x-referer"];
+    }
+    const resp = await fetch(target, { headers: fetchHeaders, redirect: "follow" });
     res.status(resp.status);
     for (const [k, v] of resp.headers) {
       const lk = k.toLowerCase();
@@ -309,7 +290,7 @@ app.get("/api/tv-proxy", async (req, res) => {
     const buf = Buffer.from(await resp.arrayBuffer());
     if (ct.includes("text/html")) {
       let html = buf.toString("utf8");
-      html = html.replace("<head>", `<head><base href="${target}">`);
+      html = html.replace("<head>", `<head><base href="${escapeAttr(target)}">`);
       res.setHeader("content-length", Buffer.byteLength(html));
       return res.send(html);
     }
@@ -317,11 +298,18 @@ app.get("/api/tv-proxy", async (req, res) => {
   } catch (e) {
     const withError = PAGE_NOT_FOUND.replace(
       "</p>",
-      `</p><div class="detail">${e.message.replace(/</g,"&lt;")}</div>`
+      `</p><div class="detail">${e.message.replace(/</g, "&lt;")}</div>`
     );
     res.status(502).type("html").send(withError);
   }
-});
+}
+
+// Scramjet proxy endpoint: fetches a URL on the server side and returns
+// the response with a <base> tag for relative URL resolution.
+app.get("/sj-proxy", (req, res) => proxyFetch(req, res));
+
+// TV proxy endpoint: same as /sj-proxy but also maps x-cookie/x-referer headers.
+app.get("/api/tv-proxy", (req, res) => proxyFetch(req, res, { allowHeaders: true }));
 
 // Stats endpoints (Phase 3 status page consumes these; harmless now).
 app.get("/stats/json", statsJson);
@@ -331,12 +319,17 @@ app.get("/stats/stream", statsSse);
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 // Session creation (shared mode). POST { password } -> { sessionId, expires }.
-// The session cookie is set; subsequent requests are authenticated.
+// The submitted password is verified against the configured master password.
+// Only on a match is a session created and the cookie set.
 app.use("/api/session", (req, res, next) => {
   if (req.method === "POST") {
     express.json({ limit: "64kb" })(req, res, (err) => {
       if (err) return res.status(400).json({ error: "invalid body" });
       const password = typeof req.body.password === "string" ? req.body.password.slice(0, 64) : "";
+      // Verify against the master password using timing-safe comparison.
+      if (!verifyMasterPassword(password)) {
+        return res.status(401).json({ error: "wrong password" });
+      }
       const { id, expires } = createSession(password);
       res.cookie("lux_sid", id, {
         httpOnly: true,
@@ -351,6 +344,16 @@ app.use("/api/session", (req, res, next) => {
     next();
   }
 });
+
+// Timing-safe comparison of the submitted password against the master password.
+function verifyMasterPassword(candidate) {
+  const master = config.masterPassword;
+  if (!master) return false; // No master password configured = deny all.
+  const a = Buffer.from(candidate, "utf8");
+  const b = Buffer.from(master, "utf8");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
 
 // Login page (shared mode). A minimal form that POSTs to /api/session.
 app.get("/login", (req, res) => {
@@ -400,6 +403,8 @@ function handleChat(req, socket) {
   );
 
   let buffer = Buffer.alloc(0);
+  const MAX_MESSAGE = 65536; // 64KB cap per message
+  const MAX_BUFFER = 262144; // 256KB total buffer cap (prevents memory DoS)
 
   function sendWS(data) {
     const payload = Buffer.from(data, "utf8");
@@ -426,6 +431,18 @@ function handleChat(req, socket) {
     socket.write(frame);
   }
 
+  function sendPong(payload) {
+    const frame = Buffer.alloc(2 + payload.length);
+    frame[0] = 0x8a; // FIN + pong opcode
+    frame[1] = payload.length;
+    payload.copy(frame, 2);
+    socket.write(frame);
+  }
+
+  function sendClose() {
+    socket.write(Buffer.from([0x88, 0x00])); // FIN + close, no payload
+  }
+
   chatClients.add(sendWS);
   if (CHAT_HISTORY.length) {
     sendWS(JSON.stringify({ type: "history", messages: CHAT_HISTORY }));
@@ -434,6 +451,13 @@ function handleChat(req, socket) {
 
   socket.on("data", (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
+    // Guard against unbounded buffer growth (memory DoS).
+    if (buffer.length > MAX_BUFFER) {
+      chatClients.delete(sendWS);
+      sendClose();
+      socket.end();
+      return;
+    }
     while (buffer.length >= 2) {
       const opcode = buffer[0] & 0x0f;
       const masked = buffer[1] & 0x80;
@@ -458,14 +482,31 @@ function handleChat(req, socket) {
       }
 
       if (buffer.length < offset + payloadLen) return;
+
+      // Enforce per-message size cap.
+      if (payloadLen > MAX_MESSAGE) {
+        chatClients.delete(sendWS);
+        sendClose();
+        socket.end();
+        return;
+      }
+
       let payload = Buffer.from(buffer.slice(offset, offset + payloadLen));
       if (maskKey) {
         for (let i = 0; i < payload.length; i++) payload[i] ^= maskKey[i % 4];
       }
       buffer = buffer.slice(offset + payloadLen);
 
+      // Ping: respond with pong (echo payload).
+      if (opcode === 0x09) {
+        sendPong(payload);
+        continue;
+      }
+      // Close: echo and disconnect.
       if (opcode === 0x08) {
         chatClients.delete(sendWS);
+        sendClose();
+        socket.end();
         broadcast({ type: "system", text: "A user left the chat." });
         return;
       }

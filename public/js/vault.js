@@ -65,6 +65,7 @@ const SALT_KEY = "lux.vault.salt";
 
 let dbPromise = null;
 let cryptoKey = null;
+let vaultPassphrase = null;
 
 function openDb() {
   if (dbPromise) return dbPromise;
@@ -108,13 +109,25 @@ async function deriveKey(passphrase) {
   );
 }
 
+// Set the passphrase used to derive the vault encryption key. Called after
+// successful unlock with the user's actual plaintext password. If no password
+// is set (lock disabled), falls back to a device-bound key.
+export function setVaultPassphrase(passphrase) {
+  vaultPassphrase = passphrase || "";
+  // Re-derive the key with the new passphrase (async, non-blocking).
+  cryptoKey = null;
+}
+
+// Clear the cached key from memory. Called on lock to prevent access to
+// decrypted data while the screen is locked.
+export function clearVaultKey() {
+  cryptoKey = null;
+  vaultPassphrase = null;
+}
+
 async function ensureKey() {
   if (cryptoKey) return cryptoKey;
-  // Use the lock phrase if set, else fall back to the device key.
-  const phrase = localStorage.getItem("lux.settings.v1")
-    ? JSON.parse(localStorage.getItem("lux.settings.v1")).lockPhrase
-    : "";
-  cryptoKey = await deriveKey(phrase || "");
+  cryptoKey = await deriveKey(vaultPassphrase || "");
   return cryptoKey;
 }
 

@@ -21,6 +21,11 @@ export const config = {
   // Shared-mode session settings.
   sessionTtlHours: Number(process.env.LUX_SESSION_TTL_HOURS) || 168, // 1 week
 
+  // Master password for shared mode. Users must submit this to get a session.
+  // Set via LUX_MASTER_PASSWORD env var or config.local.js. If empty in shared
+  // mode, the server refuses to start (prevents accidental open access).
+  masterPassword: process.env.LUX_MASTER_PASSWORD || "",
+
   // In single mode the server binds 0.0.0.0 by default, which exposes it to
   // the LAN. Set LUX_HOST=127.0.0.1 to restrict to localhost only.
 };

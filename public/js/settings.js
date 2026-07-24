@@ -24,8 +24,6 @@ export const DEFAULTS = {
   // Appearance.
   theme: "light",            // "light" | "dark"
   background: "dots",        // "dots" | "stars" | "none"
-  showDock: true,            // macOS-style tools dock
-  fullscreenMode: "off",     // "off" | "page" | "full"
   windowChrome: "macos",     // "macos" | "windows"
 
   // Lock / panic.
@@ -37,7 +35,6 @@ export const DEFAULTS = {
   lockOnExit: false,         // re-lock when all tabs close
 
   // Hardening.
-  blockDevtools: true,       // best-effort devtools disruption (disable to debug)
   panicKey: "Backquote",     // backtick
   panicDecoy: "https://classroom.google.com/",
 
@@ -52,6 +49,7 @@ export const DEFAULTS = {
   // Extensions.
   clearUrls: true,           // strip tracking params from links
   adBlock: true,             // lightweight element/hostname blocking
+  privacyGuard: true,        // block behavioral tracking (focus/visibility/clipboard events)
   eventHandling: true,       // allow sites' event listeners (disable = freeze overlays)
   googleOptOut: true,        // set Google opt-out cookie
   killSwitch: true,          // halt traffic if the network changes until verified
