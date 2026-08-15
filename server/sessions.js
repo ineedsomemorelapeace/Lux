@@ -50,5 +50,11 @@ function hashPassword(password, salt) {
   return createHash("sha256").update(salt + ":" + (password || "")).digest("hex");
 }
 
-// TTL from env or default 1 week. Read once at startup.
-const SESSION_TTL_MS = (Number(process.env.LUX_SESSION_TTL_HOURS) || 168) * 3600 * 1000;
+// TTL from env or default 1 week. Read once at startup. Can be overridden
+// through config.local.js via configureSessionTtl().
+let SESSION_TTL_MS = (Number(process.env.LUX_SESSION_TTL_HOURS) || 168) * 3600 * 1000;
+
+export function configureSessionTtl(hours) {
+  const h = Number(hours);
+  if (Number.isFinite(h) && h > 0) SESSION_TTL_MS = h * 3600 * 1000;
+}

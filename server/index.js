@@ -16,20 +16,26 @@
 
 import express from "express";
 import compression from "compression";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createServer } from "node:http";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { server as wisp, logging as wispLogging } from "@mercuryworkshop/wisp-js/server";
 import { statsJson, statsSse, userConnected, userDisconnected } from "./stats.js";
 import { config } from "./config.js";
-import { createSession, sessionExists } from "./sessions.js";
+import { createSession, sessionExists, configureSessionTtl } from "./sessions.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = dirname(__dirname);
 const publicDir = join(root, "public");
 
-const PORT = Number(process.env.PORT) || 8080;
-const HOST = process.env.HOST || "0.0.0.0";
+// Use the merged config (env vars + config.local.js), not just raw env vars.
+const PORT = Number(config.port) || 8080;
+const HOST = config.host || "0.0.0.0";
+
+configureSessionTtl(config.sessionTtlHours);
 
 // Minimal login page for shared mode. No external dependencies.
 const LOGIN_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lux</title>
@@ -44,10 +50,22 @@ if (process.env.NODE_ENV === "production") {
 }
 
 const app = express();
+app.disable("x-powered-by");
+if (config.trustProxy) app.set("trust proxy", 1);
 
 // In shared mode, gate every request behind a session cookie. The login page
 // and the session-create endpoint are exempt. In single mode, no auth.
+// /stats/json and /stats/stream are left open so operators can monitor load;
+// set STATS_TOKEN in config.local.js to require it.
 const MODE = config.mode || "single";
+const STATS_TOKEN = process.env.STATS_TOKEN || config.statsToken || "";
+
+function statsAuthorized(req) {
+  if (!STATS_TOKEN) return true;
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : req.query.token || "";
+  return token === STATS_TOKEN;
+}
 if (MODE === "shared" && !config.masterPassword) {
   console.error("\n  FATAL: shared mode requires a master password.");
   console.error("  Set LUX_MASTER_PASSWORD env var or add masterPassword to config.local.js.\n");
@@ -60,8 +78,7 @@ if (MODE === "shared") {
       return next();
     }
     // Check the session cookie.
-    const sid = parseCookie(req.headers.cookie || "", "lux_sid");
-    if (sid && sessionExists(sid)) return next();
+    if (hasValidSession(req)) return next();
     // No valid session: redirect to login.
     if (req.path.startsWith("/api/") || req.headers.accept?.includes("application/json")) {
       return res.status(401).json({ error: "no session" });
@@ -77,6 +94,11 @@ function parseCookie(header, name) {
     if (k === name) return v;
   }
   return null;
+}
+
+function hasValidSession(req) {
+  const sid = parseCookie(req.headers.cookie || "", "lux_sid");
+  return !!sid && sessionExists(sid);
 }
 
 // Count each unique connection toward the active-user stat, keyed by Host so
@@ -134,6 +156,8 @@ const transportStaticOptions = {
     } else if (filePath.endsWith(".wasm")) {
       res.type("application/wasm");
     }
+    // Built bundles change only on rebuild/redeploy; allow 1h revalidation.
+    res.setHeader("Cache-Control", "public, max-age=3600, stale-while-revalidate=600");
   },
   fallthrough: false,
 };
@@ -164,6 +188,7 @@ app.use("/assets", express.static(join(publicDir, "assets"), { fallthrough: fals
 // proxy loads the page but never rewrites anything.
 app.get("/uv.sw.js", (req, res) => {
   res.set("Service-Worker-Allowed", "/");
+  res.set("Cache-Control", "no-cache, no-store, must-revalidate");
   res.sendFile(join(publicDir, "uv/uv.sw.js"));
 });
 app.get("/sj.sw.js", (req, res) => {
@@ -236,23 +261,93 @@ If you believe this is an error, please contact the site owner.</p>
 // Security: blocks private/internal IPs (SSRF) and HTML-escapes the base href.
 
 function isPrivateHost(hostname) {
-  // Block access to private/internal ranges to prevent SSRF.
-  if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1") return true;
-  if (hostname === "0.0.0.0") return true;
+  // Quick textual checks first (no DNS needed for these).
+  if (!hostname) return true;
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h === "localhost.localdomain" || h === "localhost6") return true;
+  if (h === "0.0.0.0" || h === "0" || h === "[::]" || h === "::") return true;
   // Link-local / cloud metadata.
-  if (hostname === "169.254.169.254" || hostname.startsWith("169.254.")) return true;
-  // Private IPv4 ranges.
-  if (/^10\./.test(hostname)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(hostname)) return true;
-  if (/^192\.168\./.test(hostname)) return true;
-  // IPv6 private/link-local.
-  if (hostname.startsWith("fc") || hostname.startsWith("fd")) return true;
-  if (hostname.startsWith("fe80")) return true;
+  if (h === "169.254.169.254" || h.startsWith("169.254.")) return true;
+  if (h === "metadata.google.internal" || h.endsWith(".metadata.google.internal")) return true;
+  // IPv4 literal checks (incl. alternate forms).
+  if (/^\d+$/.test(h)) return isPrivateIp(h);
+  if (isIP(h)) return isPrivateIp(h);
+  // IPv6 private/link-local without brackets.
+  if (h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") || h.startsWith("feb")) return true;
   return false;
+}
+
+function isPrivateIp(address) {
+  // Normalize IPv4-mapped IPv6 (::ffff:1.2.3.4) and bracket wrappers.
+  let a = String(address || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (a.startsWith("::ffff:")) a = a.slice("::ffff:".length);
+  const v = isIP(a);
+  if (!v) return true; // unresolved or invalid -> treat as private (deny)
+  if (v === 6) {
+    if (a === "::" || a === "::1") return true;
+    // Unique-local fc00::/7 and link-local fe80::/10.
+    if (a.startsWith("fc") || a.startsWith("fd") || a.startsWith("fe8") || a.startsWith("fe9") || a.startsWith("fea") || a.startsWith("feb")) return true;
+    // IPv4-mapped IPv6 loopback.
+    return false;
+  }
+  const parts = a.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a1, b, c] = parts;
+  if (a1 === 0 || a1 === 10 || a1 === 127) return true;
+  if (a1 === 100 && b >= 64 && b <= 127) return true; // CGNAT 100.64/10
+  if (a1 === 169 && b === 254) return true;
+  if (a1 === 172 && b >= 16 && b <= 31) return true;
+  if (a1 === 192 && b === 168) return true;
+  if (a1 >= 224) return true; // multicast/experimental
+  return false;
+}
+
+async function assertPublicUrl(urlStr) {
+  let parsed;
+  try {
+    parsed = new URL(urlStr);
+  } catch {
+    throw new Error("Invalid URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("Unsupported protocol");
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (isPrivateHost(hostname)) throw new Error("Blocked address");
+  if (isIP(hostname)) {
+    if (isPrivateIp(hostname)) throw new Error("Blocked address");
+    return;
+  }
+  // Resolve DNS and verify every address is public (prevents DNS rebinding).
+  let records;
+  try {
+    records = await dnsLookup(hostname, { all: true });
+  } catch {
+    throw new Error("Could not resolve hostname");
+  }
+  if (!records?.length) throw new Error("Could not resolve hostname");
+  for (const r of records) {
+    if (isPrivateIp(r.address)) throw new Error("Blocked address");
+  }
 }
 
 function escapeAttr(s) {
   return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function fetchWithRedirectChecks(url, headers) {
+  let current = url;
+  for (let hop = 0; hop < 5; hop++) {
+    await assertPublicUrl(current);
+    const resp = await fetch(current, { headers, redirect: "manual" });
+    const status = resp.status;
+    if ([301, 302, 303, 307, 308].includes(status)) {
+      const location = resp.headers.get("location");
+      if (!location) return resp;
+      current = new URL(location, current).href;
+      continue;
+    }
+    return resp;
+  }
+  throw new Error("Too many redirects");
 }
 
 async function proxyFetch(req, res, { allowHeaders = false } = {}) {
@@ -263,14 +358,10 @@ async function proxyFetch(req, res, { allowHeaders = false } = {}) {
   if (!target.startsWith("http://") && !target.startsWith("https://")) {
     return res.status(400).type("html").send(PAGE_NOT_FOUND);
   }
-  // SSRF guard: block private/internal destinations.
   try {
-    const parsed = new URL(target);
-    if (isPrivateHost(parsed.hostname)) {
-      return res.status(403).type("html").send(PAGE_NOT_FOUND);
-    }
-  } catch {
-    return res.status(400).type("html").send(PAGE_NOT_FOUND);
+    await assertPublicUrl(target);
+  } catch (e) {
+    return res.status(403).type("html").send(PAGE_NOT_FOUND);
   }
   try {
     const fetchHeaders = { "User-Agent": req.headers["user-agent"] || "" };
@@ -278,30 +369,45 @@ async function proxyFetch(req, res, { allowHeaders = false } = {}) {
       if (req.headers["x-cookie"]) fetchHeaders.cookie = req.headers["x-cookie"];
       if (req.headers["x-referer"]) fetchHeaders.referer = req.headers["x-referer"];
     }
-    const resp = await fetch(target, { headers: fetchHeaders, redirect: "follow" });
+    const resp = await fetchWithRedirectChecks(target, fetchHeaders);
     res.status(resp.status);
     for (const [k, v] of resp.headers) {
       const lk = k.toLowerCase();
+      // Set-Cookie/clear-site-data are stripped so a proxied site cannot
+      // overwrite Lux's own cookies. X-Frame-Options and CSP are stripped so
+      // the proxied page can render in Lux's iframe.
       if (["transfer-encoding", "connection", "keep-alive", "content-security-policy",
-           "content-encoding", "content-length"].includes(lk)) continue;
+           "content-security-policy-report-only", "content-encoding", "content-length",
+           "set-cookie", "clear-site-data", "x-frame-options"].includes(lk)) continue;
       res.setHeader(k, v);
     }
     const ct = resp.headers.get("content-type") || "";
     const buf = Buffer.from(await resp.arrayBuffer());
     if (ct.includes("text/html")) {
       let html = buf.toString("utf8");
-      html = html.replace("<head>", `<head><base href="${escapeAttr(target)}">`);
+      // Insert <base> into the first <head>/<HEAD> so relative URLs resolve.
+      html = html.replace(/<head[^>]*>/i, (m) => m + `<base href="${escapeAttr(target)}">`);
       res.setHeader("content-length", Buffer.byteLength(html));
       return res.send(html);
     }
     res.send(buf);
   } catch (e) {
+    const msg = e.message || String(e);
     const withError = PAGE_NOT_FOUND.replace(
       "</p>",
-      `</p><div class="detail">${e.message.replace(/</g, "&lt;")}</div>`
+      `</p><div class="detail">${escapeHtml(msg)}</div>`
     );
     res.status(502).type("html").send(withError);
   }
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 // Scramjet proxy endpoint: fetches a URL on the server side and returns
@@ -312,17 +418,29 @@ app.get("/sj-proxy", (req, res) => proxyFetch(req, res));
 app.get("/api/tv-proxy", (req, res) => proxyFetch(req, res, { allowHeaders: true }));
 
 // Stats endpoints (Phase 3 status page consumes these; harmless now).
-app.get("/stats/json", statsJson);
-app.get("/stats/stream", statsSse);
+app.get("/stats/json", (req, res) => {
+  if (!statsAuthorized(req)) return res.status(401).json({ error: "unauthorized" });
+  return statsJson(req, res);
+});
+app.get("/stats/stream", (req, res) => {
+  if (!statsAuthorized(req)) return res.status(401).json({ error: "unauthorized" });
+  return statsSse(req, res);
+});
 
 // Health check for deploy platforms (Render/Railway/Fly uptime probes).
-app.get("/health", (req, res) => res.json({ ok: true }));
+app.get("/health", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({ ok: true });
+});
 
 // Session creation (shared mode). POST { password } -> { sessionId, expires }.
 // The submitted password is verified against the configured master password.
 // Only on a match is a session created and the cookie set.
 app.use("/api/session", (req, res, next) => {
   if (req.method === "POST") {
+    if (loginRateLimited(req)) {
+      return res.status(429).json({ error: "too many attempts" });
+    }
     express.json({ limit: "64kb" })(req, res, (err) => {
       if (err) return res.status(400).json({ error: "invalid body" });
       const password = typeof req.body.password === "string" ? req.body.password.slice(0, 64) : "";
@@ -334,6 +452,7 @@ app.use("/api/session", (req, res, next) => {
       res.cookie("lux_sid", id, {
         httpOnly: true,
         sameSite: "lax",
+        secure: req.secure || req.headers["x-forwarded-proto"] === "https",
         maxAge: expires - Date.now(),
       });
       res.json({ sessionId: id, expires });
@@ -355,24 +474,47 @@ function verifyMasterPassword(candidate) {
   return crypto.timingSafeEqual(a, b);
 }
 
+// Brute-force throttle for the shared-mode login endpoint.
+const loginAttempts = new Map();
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+const LOGIN_BLOCK_MS = 10 * 60 * 1000;
+
+function loginRateLimited(req) {
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  let entry = loginAttempts.get(ip);
+  if (!entry || now > entry.blockUntil + LOGIN_WINDOW_MS) {
+    entry = { count: 0, blockUntil: 0 };
+    loginAttempts.set(ip, entry);
+  }
+  if (entry.blockUntil > now) return true;
+  entry.count++;
+  if (entry.count > LOGIN_MAX_ATTEMPTS) {
+    entry.blockUntil = now + LOGIN_BLOCK_MS;
+    entry.count = 0;
+    return true;
+  }
+  return false;
+}
+
 // Login page (shared mode). A minimal form that POSTs to /api/session.
 app.get("/login", (req, res) => {
   res.type("html").send(LOGIN_HTML);
 });
 
 // Egress IP echo. Used by the kill switch and the IP badge. Returns the
-// client's apparent IP (as the server sees it). Behind a reverse proxy, we
-// honor X-Forwarded-For so the real client IP is shown.
+// client's apparent IP (as the server sees it). Express only honors
+// X-Forwarded-For when `trust proxy` is enabled (LUX_TRUST_PROXY=1 or
+// config.local.js trustProxy), so spoofed XFF headers are ignored by default.
 app.get("/ip", (req, res) => {
-  const fwd = req.headers["x-forwarded-for"];
-  const ip = (fwd && fwd.split(",")[0].trim()) || req.socket.remoteAddress || "";
+  const ip = req.ip || req.socket.remoteAddress || "";
   res.set("Cache-Control", "no-store").json({ ip });
 });
 
 // ---- Chat WebSocket ----
 // Simple in-memory chat. Minimal WebSocket implementation using Node's
 // built-in crypto for the handshake, and raw TCP frames for messaging.
-import crypto from "node:crypto";
 
 const CHAT_HISTORY = [];
 const CHAT_MAX = 100;
@@ -389,8 +531,15 @@ function handleChat(req, socket) {
   if (req.headers["upgrade"]?.toLowerCase() !== "websocket") {
     return socket.end();
   }
+  // The Express session middleware does not run for WebSocket upgrades.
+  if (MODE === "shared" && !hasValidSession(req)) {
+    return socket.end();
+  }
 
   const key = req.headers["sec-websocket-key"];
+  if (!key || req.headers["sec-websocket-version"] !== "13") {
+    return socket.end();
+  }
   const accept = crypto.createHash("sha1")
     .update(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
     .digest("base64");
@@ -530,12 +679,26 @@ function handleChat(req, socket) {
     chatClients.delete(sendWS);
     broadcast({ type: "system", text: "A user left the chat." });
   });
+
+  socket.on("error", () => {
+    chatClients.delete(sendWS);
+    try { socket.end(); } catch {}
+  });
 }
 
 // Create the HTTP server and attach wisp to the upgrade event. UV's service
 // worker connects to /wisp/ over WebSocket; wisp.routeRequest multiplexes
 // each connection into per-stream TCP/UDP tunnels to the real destinations.
 const httpServer = createServer(app);
+httpServer.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`\n  FATAL: port ${err.port} is already in use.`);
+    console.error("  Stop the other process or set PORT to a different value.\n");
+  } else {
+    console.error("\n  FATAL server error:", err.message, "\n");
+  }
+  process.exit(1);
+});
 httpServer.on("upgrade", (req, socket, head) => {
   if (req.url.startsWith("/wisp/")) {
     wisp.routeRequest(req, socket, head);

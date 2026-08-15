@@ -60,17 +60,21 @@ export function statsSse(req, res) {
     "Cache-Control": "no-store",
     Connection: "keep-alive",
   });
-  res.write(`data: ${JSON.stringify(snapshot())}\n\n`);
+  const send = () => res.write(`data: ${JSON.stringify(snapshot())}\n\n`);
+  send();
 
   // Send a fresh snapshot every 5s while the client is connected.
-  const timer = setInterval(() => {
-    res.write(`data: ${JSON.stringify(snapshot())}\n\n`);
-  }, 5000);
+  const timer = setInterval(send, 5000);
+  if (timer.unref) timer.unref();
 
   // Track this connection as an active user so the count reflects viewers.
   const host = req.headers.host || "unknown";
   userConnected(host);
   req.on("close", () => {
+    clearInterval(timer);
+    userDisconnected(host);
+  });
+  req.on("error", () => {
     clearInterval(timer);
     userDisconnected(host);
   });

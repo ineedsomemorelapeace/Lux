@@ -61,6 +61,10 @@ export function createTab(url = null) {
 
   // Wire the load event to sync URL/title/crumb from the real destination.
   iframe.addEventListener("load", () => onTabLoad(tab));
+  iframe.addEventListener("error", () => {
+    tab.loading = false;
+    emit("tabUpdated", tab);
+  });
 
   emit("tabCreated", tab);
   activateTab(id);
@@ -137,8 +141,15 @@ export async function navigateTab(id, url, recordHistory = true) {
     // The engine + transport setup is shared (one SW, one wisp connection).
     // Some engines (Scramjet v2) manage their own frame via mountTab.
     const { setTransportFor, getEngine, buildProxyPath, encodeForTab, mountTab } = await import("./tab-nav.js");
-    await setTransportFor(getEngine().name);
-    await getEngine().init();
+    // Run transport setup, engine init, and SW ready in parallel. Transport
+    // and init both need the SW to be controlling, but they can each wait on
+    // their own promises instead of running serially.
+    const engine = getEngine();
+    await Promise.all([
+      setTransportFor(engine.name),
+      engine.init(),
+      navigator.serviceWorker?.ready.catch(() => {}),
+    ]);
     const mounted = await mountTab(tab, url);
     if (!mounted) {
       const path = encodeForTab(url);
@@ -158,6 +169,38 @@ export async function navigateTab(id, url, recordHistory = true) {
     emit("tabUpdated", tab);
     console.error("[lux] tab navigate error:", err);
   }
+}
+
+// Load an already-proxied Lux URL directly without running it through the
+// engine encoder again (which would double-encode and break it).
+export async function loadProxiedUrl(id, proxiedUrl) {
+  const tab = getTab(id);
+  if (!tab) return;
+  tab.url = proxiedUrl;
+  tab.loading = true;
+  emit("tabUpdated", tab);
+  try {
+    // Make sure the engine + SW are ready before setting iframe.src, or the
+    // browser sends the proxied path to the server as a plain navigation
+    // (the SW only intercepts once it controls the page).
+    const { getEngine, setTransportFor } = await import("./tab-nav.js");
+    const engine = getEngine();
+    await Promise.all([
+      setTransportFor(engine.name),
+      engine.init(),
+      navigator.serviceWorker?.ready.catch(() => {}),
+    ]);
+  } catch (e) {
+    console.warn("[lux] proxied URL load setup failed:", e);
+  }
+  tab.iframe.src = proxiedUrl;
+  if (tab.historyIdx < tab.history.length - 1) {
+    tab.history = tab.history.slice(0, tab.historyIdx + 1);
+  }
+  tab.history.push(proxiedUrl);
+  tab.historyIdx = tab.history.length - 1;
+  emit("tabUpdated", tab);
+  syncToolbarFromTab(tab);
 }
 
 export function goBack(id) {
@@ -221,15 +264,23 @@ function onTabLoad(tab) {
   if (tab.id === activeTabId) syncToolbarFromTab(tab);
 }
 
-// Decode a /service/<encoded> or /s/<encoded> URL back to the real destination.
+// Decode a /s/<encoded>, /~/sj/<encoded>, or /sj-proxy?url=<encoded> URL back
+// to the real destination.
 function decodeProxiedUrl(proxiedUrl) {
   try {
+    const u = new URL(proxiedUrl);
+    if (u.pathname.startsWith("/sj-proxy")) {
+      const target = u.searchParams.get("url");
+      return target || null;
+    }
+    if (u.pathname.startsWith("/~/sj/")) {
+      return decodeURIComponent(u.pathname.slice("/~/sj/".length));
+    }
     const cfg = window.__uv$config;
     if (!cfg) return null;
-    const prefix = cfg.prefix; // "/service/" or whatever uv.config uses
-    const idx = proxiedUrl.indexOf(prefix);
-    if (idx === -1) return null;
-    const encoded = proxiedUrl.slice(idx + prefix.length).split("?")[0];
+    const prefix = cfg.prefix; // "/s/" (uv.config)
+    if (!u.pathname.startsWith(prefix)) return null;
+    const encoded = u.pathname.slice(prefix.length).split("?")[0];
     return cfg.decodeUrl(encoded);
   } catch {
     return null;

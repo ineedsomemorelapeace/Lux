@@ -64,6 +64,27 @@ function waitForController(marker) {
   });
 }
 
+// Cache init() promises per engine so rapid tab navigations don't re-register
+// service workers on every keystroke. Invalidate only when the engine changes.
+const initCache = new Map();
+let currentEngineName = null;
+
+function engineChanged() {
+  const name = getEngine().name;
+  if (currentEngineName !== null && currentEngineName !== name) initCache.clear();
+  currentEngineName = name;
+}
+
+function cachedInit(name, initFn) {
+  engineChanged();
+  if (!initCache.has(name)) {
+    const p = initFn();
+    initCache.set(name, p);
+    p.catch(() => initCache.delete(name));
+  }
+  return initCache.get(name);
+}
+
 // ---- Ultraviolet ----------------------------------------------------------
 
 const uv = {
@@ -75,6 +96,7 @@ const uv = {
     if (!("serviceWorker" in navigator)) {
       throw new Error("Service workers are not supported in this browser.");
     }
+    return cachedInit("uv", async () => {
     // Unregister any OTHER root-scoped SW (e.g. Scramjet's) so they don't
     // conflict over the / scope. Only unregister if it's active AND its
     // script is not uv.sw.js — never unregister an installing UV SW (that
@@ -105,6 +127,7 @@ const uv = {
       await setTransport("/epoxy/index.mjs", [{ wisp: wispUrl }]);
     } catch (e) { console.warn("[lux] transport reset:", e); }
     return reg;
+    });
   },
 
   encode(url) {
@@ -129,32 +152,6 @@ const uv = {
 
 const PREFIX_SJ = "/~/sj/";
 let scramjetController = null; // Singleton controller instance
-
-// Wait for the SJ SW to become navigator.serviceWorker.controller. The
-// controller's RPC works via MessageChannel, but fetch interception needs the
-// SW to actually control the page. After unregistering UV and registering SJ,
-// we poll controllerchange until the SJ SW takes over.
-function waitForSjControl() {
-  return new Promise((resolve) => {
-    if (navigator.serviceWorker.controller) {
-      const url = navigator.serviceWorker.controller.scriptURL || "";
-      if (url.includes("sj.sw.js")) return resolve();
-    }
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    const handler = () => {
-      const c = navigator.serviceWorker.controller;
-      if (c && (c.scriptURL || "").includes("sj.sw.js")) {
-        navigator.serviceWorker.removeEventListener("controllerchange", handler);
-        finish();
-      }
-    };
-    navigator.serviceWorker.addEventListener("controllerchange", handler);
-    // The SJ SW has skipWaiting + clients.claim, so this should resolve fast.
-    // Timeout after 5s as a safety net.
-    setTimeout(finish, 5000);
-  });
-}
 
 // Try to initialize the full Scramjet controller
 async function tryInitController() {
@@ -218,6 +215,7 @@ const scramjet = {
   async init() {
     // If the controller was already initialized at boot (early init), skip.
     if (scramjetController) return;
+    return cachedInit("scramjet", async () => {
     // Unregister UV's SW if active so SJ can take over the root scope.
     const existing = await navigator.serviceWorker.getRegistrations();
     for (const reg of existing) {
@@ -236,6 +234,7 @@ const scramjet = {
     // Try the full controller init. If it fails, mount() falls back to
     // /sj-proxy server-side rewriting.
     await tryInitController();
+    });
   },
 
   encode(url) {

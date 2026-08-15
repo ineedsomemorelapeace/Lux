@@ -87,9 +87,17 @@ function addRequest(data) {
     "<span>" + escapeHtml(shortUrl) + "</span>" +
     "<span style='float:right;color:var(--ink-soft)'>" + size + "</span>";
 
-  // Show full URL on click.
+  // Show full URL on click (toast, not alert — alert steals focus and is
+  // jarring when the panel is toggled).
   row.addEventListener("click", () => {
-    alert("Full URL: " + url + "\nStatus: " + status + "\nMethod: " + method + "\nSize: " + size);
+    const toast = document.createElement("div");
+    toast.textContent = "Full URL: " + url + " · " + method + " " + status + " · " + size;
+    toast.style.cssText =
+      "position:fixed;bottom:70px;right:12px;z-index:100;background:var(--ink);color:var(--bg);" +
+      "padding:8px 12px;border-radius:8px;font-size:12px;max-width:80%;word-break:break-all;" +
+      "box-shadow:0 4px 16px rgba(0,0,0,0.3)";
+    document.body.appendChild(toast);
+    setTimeout(() => toast.remove(), 4000);
   });
 
   list.insertBefore(row, list.firstChild);

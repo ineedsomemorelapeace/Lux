@@ -18,6 +18,8 @@
 //
 //   { "format": "lux-session", "version": 1, "exportedAt": <epoch>, "data": { ... } }
 
+import { invalidateSettingsCache } from "./settings.js";
+
 const FORMAT = "lux-session";
 const VERSION = 1;
 
@@ -122,6 +124,7 @@ export async function importSession(jsonText) {
 
   if (d.settings) {
     localStorage.setItem("lux.settings.v1", d.settings);
+    invalidateSettingsCache();
   }
   if (d.vaultSalt) {
     localStorage.setItem("lux.vault.salt", d.vaultSalt);

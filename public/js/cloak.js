@@ -24,7 +24,7 @@ export async function openCloaked(targetUrl, encodeFn) {
   }
   popup.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Loading</title>
 <style>html,body{margin:0;padding:0;height:100%;background:#000;overflow:hidden}iframe{width:100%;height:100%;border:0}</style>
-</head><body><iframe src="${proxied}" allow="fullscreen; clipboard-read; clipboard-write; encrypted-media; gamepad; web-share"></iframe></body></html>`);
+</head><body><iframe src="${proxied}" referrerpolicy="no-referrer" allow="fullscreen; clipboard-read; clipboard-write; encrypted-media; gamepad; web-share"></iframe></body></html>`);
   popup.document.close();
   return popup;
 }

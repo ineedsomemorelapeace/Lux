@@ -95,7 +95,20 @@ export function startVolumePoll() {
   if (volumePollTimer) clearInterval(volumePollTimer);
   const saved = loadSettings().masterVolume;
   if (typeof saved !== "number") return;
-  volumePollTimer = setInterval(() => setVolume(saved), 3000);
+  volumePollTimer = setInterval(() => {
+    // Only touch the DOM if a visible tab frame actually has media.
+    for (const frame of document.querySelectorAll("iframe.lux-tab-frame")) {
+      if (frame.style.display === "none") continue;
+      try {
+        const doc = frame.contentDocument;
+        if (!doc) continue;
+        const media = doc.querySelector("audio, video");
+        if (media) {
+          for (const el of doc.querySelectorAll("audio, video")) el.volume = Math.max(0, Math.min(1, saved));
+        }
+      } catch {}
+    }
+  }, 3000);
 }
 
 export function getVolume() {

@@ -32,14 +32,10 @@ export function normalizeUrl(input) {
 }
 
 export function buildProxyPath(targetUrl) {
-  const settings = loadSettings();
-  switch (settings.urlScheme) {
-    case "plain":
-      return (settings.customPrefix || "/service/") + targetUrl;
-    case "none":
-      return null;
-    case "encoded":
-    default:
-      return "engine";
-  }
+  // Only the engine's native codec is supported. The old "plain" and "none"
+  // schemes were broken: "plain" produced /s/<cleartext> which UV XOR-decoded
+  // into garbage, and "none" loaded the destination directly (no proxying at
+  // all). Both now fall through to the working obfuscated engine path so a
+  // stale setting can never silently break navigation again.
+  return "engine";
 }

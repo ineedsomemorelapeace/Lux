@@ -18,6 +18,15 @@ export const config = {
   port: Number(process.env.PORT) || 8080,
   host: process.env.HOST || "0.0.0.0",
 
+  // Set LUX_TRUST_PROXY=1 (or trustProxy: true in config.local.js) when Lux
+  // runs behind nginx/Caddy. This makes Express trust X-Forwarded-For for
+  // req.ip and the /ip echo. Leave off otherwise.
+  trustProxy: process.env.LUX_TRUST_PROXY === "1" || process.env.LUX_TRUST_PROXY === "true" || false,
+
+  // Optional bearer token required for /stats/json and /stats/stream.
+  // Set via STATS_TOKEN env var or statsToken in config.local.js.
+  statsToken: process.env.STATS_TOKEN || "",
+
   // Shared-mode session settings.
   sessionTtlHours: Number(process.env.LUX_SESSION_TTL_HOURS) || 168, // 1 week
 

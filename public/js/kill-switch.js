@@ -34,7 +34,13 @@ function trip(reason) {
 function pauseAllTabs() {
   for (const tab of getAllTabs()) {
     try { tab.iframe.contentWindow.stop(); } catch {}
+    // Detach the iframe briefly so the pending page can't finish painting
+    // after the kill switch trips.
+    const parent = tab.iframe.parentNode;
+    const next = tab.iframe.nextSibling;
+    tab.iframe.remove();
     tab.iframe.src = "about:blank";
+    if (parent) parent.insertBefore(tab.iframe, next);
   }
 }
 

@@ -98,3 +98,7 @@ export function resetSettings() {
   window.dispatchEvent(new CustomEvent("lux:settings", { detail: cache }));
   return cache;
 }
+
+export function invalidateSettingsCache() {
+  cache = null;
+}

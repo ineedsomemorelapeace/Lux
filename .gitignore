@@ -17,6 +17,13 @@ public/webretro/
 # logs
 *.log
 npm-debug.log*
+errors.txt
+server_output.txt
+
+# local artifacts / reference downloads
+browser.rammerhead.org.html
+browser.rammerhead.org_files/
+dogfood-output/
 
 # env
 .env
@@ -30,6 +37,7 @@ nul
 # editor
 .vscode/
 .idea/
+.zcode/
 tinf0il*
 .commandcode/
 _tinf0il*

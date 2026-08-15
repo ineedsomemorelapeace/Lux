@@ -11,14 +11,13 @@ import { applyGoogleOptOut } from "./extensions.js";
 import * as kill from "./kill-switch.js";
 import { openCloaked, armPanicKey, enableAntiClose } from "./cloak.js";
 import { initVault, saveNote, listVault, openVaultItem, deleteVaultItem, importFile } from "./vault.js";
-import { armPrimeOnFirstGesture } from "./popup-perm.js";
 import { initInfoPanel } from "./info.js";
 import { initDevtools, show as showDevtools, hide as hideDevtools } from "./devtools.js";
 import { launchApp, focusWindow, closeWindow, createWindow } from "./wm.js";
 import { listEngines as listSearchEngines } from "./search-engines.js";
 import { pickRomFolder, renderGamesHome, launchRom } from "./games.js";
 import { initTV, addCustomApp } from "./tv.js";
-import { initChat, disconnectChat } from "./chat.js";
+import { initChat } from "./chat.js";
 import { downloadSession, pickAndImportSession } from "./session.js";
 import { startIframeWatch, stopIframeWatch } from "./iframe-watch.js";
 import { startTitleWatch, stopTitleWatch } from "./true-title.js";
@@ -64,7 +63,6 @@ async function boot() {
   initChat();
   initSessionTransfer();
   initUsbKillswitch();
-  armPrimeOnFirstGesture();
   initTrueUrlReveal();
   initClock();
   initKeyboardShortcuts();
@@ -79,9 +77,10 @@ async function boot() {
   // NOW (at boot), not lazily on first navigate. The SJ SW needs to install,
   // activate, and claim the page before any navigation happens — this is the
   // Tinf0il pattern and fixes the "SW doesn't control the page" timing bug.
+  // Warm up in the background; do not block first paint on it.
   const savedSettings = loadSettings();
   if (savedSettings.engine === "scramjet") {
-    initScramjetEarly();
+    initScramjetEarly().catch((e) => console.warn("[lux] Scramjet early init failed:", e));
   }
 
   // Add hover-zone element for taskbar auto-hide
@@ -100,6 +99,13 @@ async function boot() {
 
   // New-tab page greeting.
   updateGreeting();
+
+  // Focus the omnibox for instant UX once unlocked.
+  const focusOmnibox = () => {
+    const input = $("new-tab-page")?.classList.contains("hidden") ? $("toolbar-url") : $("nt-url");
+    if (input && document.activeElement !== input) input.focus();
+  };
+  focusOmnibox();
 
   if (hashTarget) navigate(hashTarget);
 }
@@ -142,6 +148,8 @@ function syncPrivacyGuardToSW() {
     navigator.serviceWorker.controller.postMessage({
       type: "lux:settings",
       privacyGuard: !!s.privacyGuard,
+      adBlock: !!s.adBlock,
+      devtools: !!s.devtools,
     });
   }
 }
@@ -404,13 +412,27 @@ function hideLoadingBar() {
 
 function navigate(input) {
   if (!input || !isUnlocked()) return;
-  // Guard: if the input contains a Lux proxy prefix (UV /s/ or Scramjet /~/sj/
-  // or /sj-proxy), it's already a proxied URL — do NOT re-encode it. This
-  // prevents the infinite encoding loop where an already-encoded URL gets
-  // passed through UV's encoder again, multiplying its length.
-  if (input.includes("/s/") || input.includes("/~/sj/") || input.includes("/sj-proxy?")) {
-    return;
-  }
+  // Guard: if the input is already a Lux proxied URL on THIS origin (UV /s/
+  // or Scramjet /~/sj/ or /sj-proxy), do NOT re-encode it. This prevents the
+  // infinite encoding loop where an already-encoded URL gets passed through
+  // UV's encoder again, multiplying its length. Only match path-like inputs,
+  // so legitimate URLs like https://example.com/s/page still work.
+  try {
+    const u = new URL(input, location.origin);
+    if (u.origin === location.origin &&
+        (u.pathname.startsWith("/s/") || u.pathname.startsWith("/~/sj/") || u.pathname.startsWith("/sj-proxy"))) {
+      // Already a Lux proxy URL: open it directly as a tab instead of
+      // silently ignoring the user's action.
+      let tab = Tabs.getActiveTab();
+      if (!tab || tab.url) tab = Tabs.createTab();
+      Tabs.loadProxiedUrl(tab.id, u.href);
+      $("toolbar-url").value = u.href;
+      showLoadingBar();
+      if (window.__luxToolbar) window.__luxToolbar.showStop();
+      onStageOpened();
+      return;
+    }
+  } catch {}
   const url = normalizeUrl(input);
   if (!url) return;
   if (breakOutOfNest(url)) return;
@@ -457,7 +479,8 @@ async function openCloakedTarget(input) {
   try {
     await setTransportFor(getEngine().name);
     await getEngine().init();
-    const enc = (u) => getEngine().encode(u) || "/uv/" + u;
+    const { encodeForTab } = await import("./tab-nav.js");
+    const enc = (u) => encodeForTab(u) || "/s/" + u;
     await openCloaked(url, enc);
     setStatus("Opened in cloaked window.");
   } catch (e) {
@@ -519,8 +542,14 @@ function initTaskbar() {
               const s = document.createElement("button");
               s.className = "btn"; s.textContent = "Save";
               s.onclick = async () => {
-                try { ed.saveDocument("scratch", ed.getActiveEditor().getHTML()); setStatus("Saved."); }
-                catch (e) { setStatus(e.message, true); }
+                try {
+                  if (typeof window.__luxEditorSave === "function") {
+                    window.__luxEditorSave();
+                    setStatus("Saved.");
+                  } else {
+                    setStatus("Editor not ready.", true);
+                  }
+                } catch (e) { setStatus(e.message, true); }
               };
               const eh = document.createElement("button");
               eh.className = "btn"; eh.textContent = "Export HTML";
@@ -791,7 +820,14 @@ function showToast(msg, onClick) {
 async function initIpBadge() {
   if (!loadSettings().showIpBadge) return;
   const ip = await kill.checkIpOnce();
-  if (ip) { $("ip-badge").innerHTML = "appears as <b>" + ip + "</b>"; }
+  if (ip) {
+    const badge = $("ip-badge");
+    const label = document.createElement("span");
+    label.textContent = "appears as ";
+    const strong = document.createElement("b");
+    strong.textContent = ip;
+    badge.replaceChildren(label, strong);
+  }
 }
 
 // ── Phase 2 ──────────────────────────────────────────────────────────────
@@ -826,7 +862,7 @@ function buildSettingsUi(s) {
     row("Search engine", sel("searchEngine", listSearchEngines().map((e) => ({ v: e.id, t: e.label })))) +
     "</div>" +
     "<div class=\"group\">" +
-    row("URL scheme", sel("urlScheme", [{ v: "encoded", t: "Obfuscated" }, { v: "plain", t: "Plain" }, { v: "none", t: "No URL" }])) +
+    row("URL scheme", sel("urlScheme", [{ v: "encoded", t: "Obfuscated (recommended)" }])) +
     row("Theme", sel("theme", [{ v: "light", t: "Light" }, { v: "dark", t: "Dark" }])) +
     row("Background", sel("background", [{ v: "dots", t: "Dots" }, { v: "stars", t: "Night sky" }, { v: "none", t: "None" }])) +
     row("Auto-hide taskbar", toggle("taskbarHide")) +
@@ -867,7 +903,7 @@ function buildSettingsUi(s) {
       applySettingsToDom(next);
       if (el.dataset.key === "taskbarHide") document.body.dataset.taskbarHide = String(val);
       if (el.dataset.key === "devtools") { if (val) showDevtools(); else hideDevtools(); }
-      if (el.dataset.key === "privacyGuard") syncPrivacyGuardToSW();
+      if (["privacyGuard", "adBlock", "devtools"].includes(el.dataset.key)) syncPrivacyGuardToSW();
     });
   });
 }

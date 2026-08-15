@@ -64,6 +64,11 @@ export async function initEditor(containerEl, initialContent = "") {
   }, "New document");
 
   const saveBtn = mk("Save", () => saveCurrent(surface), "Save");
+
+  const doSave = () => {
+    try { saveCurrent(surface); } catch (e) { console.warn("editor save:", e); }
+  };
+  window.__luxEditorSave = doSave;
   const exportHtml = mk("Export HTML", () => {
     const blob = new Blob([surface.innerHTML], { type: "text/html" });
     downloadBlob(blob, "document.html");
