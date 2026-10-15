@@ -103,7 +103,7 @@ if (existsSync(uvSwPath)) {
       "// === End filter data ===\n\n" +
       "// === Privacy Guard script (inlined from data/privacy-guard.js) ===\n" +
       "var _privacyGuardScript = " + JSON.stringify(pgSrc) + ";\n" +
-      "var _privacyGuardEnabled = true;\n" +
+      "var _privacyGuardEnabled = false;\n" +
       "var _adBlockEnabled = true;\n" +
       "var _devtoolsEnabled = false;\n" +
       "// Receive settings updates from the main page.\n" +
