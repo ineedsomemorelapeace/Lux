@@ -114,7 +114,7 @@ const uv = {
     // to permit this wider scope.
     const reg = await navigator.serviceWorker.register("/uv.sw.js", {
       scope: "/",
-      updateViaCache: "all",
+      updateViaCache: "none",
     });
     await navigator.serviceWorker.ready;
     // Wait for the UV SW to actually control this page (not just be active).
