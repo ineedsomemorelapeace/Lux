@@ -132,8 +132,11 @@ if (existsSync(uvSwPath)) {
       '    const url = new URL(req.url);\n' +
       '    const dest = req.destination;\n' +
       '    const targetHost = luxTargetHost(req.url);\n' +
-      '    // Drop ad-host sub-resource requests using the actual destination, not Lux\'s hostname.\n' +
-      '    if (_adBlockEnabled && dest !== "document" && dest !== "" && isAdHost(targetHost)) {\n' +
+      '    // Avoid breaking compatibility-sensitive sites with strict app/media request requirements.\n' +
+      '    const referrerHost = luxTargetHost(req.referrer);\n' +
+      '    const compatibilityContext = [targetHost, referrerHost].some(h => h === "twitch.tv" || h.endsWith(".twitch.tv") || h === "roblox.com" || h.endsWith(".roblox.com"));\n' +
+      '    // Apply host blocking elsewhere, but never block requests originating from Twitch or Roblox.\n' +
+      '    if (_adBlockEnabled && !compatibilityContext && dest !== "document" && dest !== "" && isAdHost(targetHost)) {\n' +
       '      event.respondWith(new Response("", { status: 204 }));\n' +
       '      return;\n' +
       '    }\n' +
