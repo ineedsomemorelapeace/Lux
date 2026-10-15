@@ -40,7 +40,9 @@ export function createTab(url = null) {
   const iframe = document.createElement("iframe");
   iframe.className = "lux-tab-frame";
   iframe.referrerpolicy = "no-referrer";
-  iframe.allow = "fullscreen; clipboard-read; clipboard-write; encrypted-media; gamepad";
+  iframe.allow = "fullscreen; autoplay; encrypted-media; picture-in-picture; clipboard-read; clipboard-write; gamepad";
+  iframe.setAttribute("webkit-playsinline", "");
+  iframe.setAttribute("playsinline", "");
   iframe.style.display = "none"; // hidden until activated
   iframe.dataset.tabId = String(id);
 

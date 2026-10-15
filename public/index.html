@@ -182,7 +182,7 @@
         <div id="tv-app-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:10px;overflow-y:auto;flex:1"></div>
       </div>
       <div id="tv-player" style="display:none;flex-direction:column;flex:1;padding:8px">
-        <iframe id="tv-frame" style="flex:1;width:100%;border:1px solid var(--line);border-radius:10px;background:#000;min-height:0" allow="fullscreen; autoplay"></iframe>
+        <iframe id="tv-frame" title="Live site" style="flex:1;width:100%;border:1px solid var(--line);border-radius:10px;background:#000;min-height:0" allow="autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-read; clipboard-write" allowfullscreen referrerpolicy="no-referrer" webkit-playsinline playsinline></iframe>
         <button class="btn" id="tv-back" style="margin-top:8px;align-self:flex-start">Back</button>
       </div>
     </div>
