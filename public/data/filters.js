@@ -42,9 +42,9 @@ export const COSMETIC_SELECTORS = [
   // Generic ad containers
   ".ad", ".ads", ".ad-container", ".ad-slot", ".ad-banner", ".ad-wrapper",
   ".advertisement", ".advertisements", ".advert", ".adsbygoogle",
-  "[class*='ad-']", "[class*='-ad']", "[class*='ads-']", "[class*='_ad_']",
-  "[id*='ad-']", "[id*='-ad']", "[id*='ads-']", "[id*='_ad_']",
-  "[id*='google_ad']", "[id*='div-gpt-ad']",
+  // Avoid broad substring selectors such as [class*="ad-"]: they also
+  // match ordinary UI names like "download-button" and can hide app controls.
+  "[id^='google_ad']", "[id^='div-gpt-ad']",
   // Sponsorship / promoted
   ".sponsored", ".sponsor", ".promotion", ".promoted",
   "[class*='sponsored']", "[class*='sponsor-']",
