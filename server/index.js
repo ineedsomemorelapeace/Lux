@@ -20,6 +20,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createServer } from "node:http";
+import { existsSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { server as wisp, logging as wispLogging } from "@mercuryworkshop/wisp-js/server";
@@ -427,10 +428,27 @@ app.get("/stats/stream", (req, res) => {
   return statsSse(req, res);
 });
 
-// Health check for deploy platforms (Render/Railway/Fly uptime probes).
+// Health check for deploy platforms. A page-only response is not enough:
+// UV can show the Lux interface while its generated transport bundles are absent.
+const REQUIRED_PROXY_FILES = [
+  "uv/uv.bundle.js",
+  "uv/uv.config.js",
+  "uv/uv.sw.js",
+  "baremux/index.mjs",
+  "baremux/worker.js",
+  "epoxy/index.mjs",
+  "epoxy/epoxy-bundled.js",
+  "epoxy/epoxy.wasm",
+];
 app.get("/health", (req, res) => {
   res.set("Cache-Control", "no-store");
-  res.json({ ok: true });
+  const missing = REQUIRED_PROXY_FILES.filter((file) => !existsSync(join(publicDir, file)));
+  const ok = missing.length === 0;
+  res.status(ok ? 200 : 503).json({
+    ok,
+    proxyReady: ok,
+    ...(ok ? {} : { missing }),
+  });
 });
 
 // Session creation (shared mode). POST { password } -> { sessionId, expires }.
