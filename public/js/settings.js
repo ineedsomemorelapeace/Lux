@@ -3,7 +3,8 @@
 // is usable on first load (no setup required) and secure by default
 // (lock mode on, cold start requires a phrase).
 
-const KEY = "lux.settings.v1";
+const KEY = "lux.settings.v2";
+const LEGACY_KEY = "lux.settings.v1";
 
 export const DEFAULTS = {
   // Which interception engine to use: "uv" or "scramjet".
@@ -75,8 +76,18 @@ let cache = null;
 export function loadSettings() {
   if (cache) return cache;
   try {
-    const raw = localStorage.getItem(KEY);
+    const current = localStorage.getItem(KEY);
+    const legacy = current ? null : localStorage.getItem(LEGACY_KEY);
+    const raw = current || legacy;
     cache = raw ? { ...DEFAULTS, ...JSON.parse(raw) } : { ...DEFAULTS };
+
+    // v1 defaulted the invasive focus/visibility patch on, which can break
+    // sign-in forms and hydrated apps. Migrate preferences but turn that
+    // patch off once; users can still opt in from Settings.
+    if (!current && legacy) {
+      cache.privacyGuard = false;
+      localStorage.setItem(KEY, JSON.stringify(cache));
+    }
   } catch {
     cache = { ...DEFAULTS };
   }
@@ -95,6 +106,7 @@ export function saveSettings(partial) {
 export function resetSettings() {
   cache = { ...DEFAULTS };
   localStorage.removeItem(KEY);
+  localStorage.removeItem(LEGACY_KEY);
   window.dispatchEvent(new CustomEvent("lux:settings", { detail: cache }));
   return cache;
 }
