@@ -115,6 +115,8 @@ if (existsSync(uvSwPath)) {
       "  }\n" +
       "});\n" +
       "// === End privacy guard ===\n\n" +
+      "// Decode the destination hostname from UV proxy paths. Some sites break when Lux injects its privacy patches.\n" +
+      "function luxTargetHost(requestUrl) { try { const u = new URL(requestUrl); const cfg = self.__uv$config; if (!cfg || !u.pathname.startsWith(cfg.prefix)) return \"\"; const encoded = u.pathname.slice(cfg.prefix.length).split(\"?\")[0]; return new URL(cfg.decodeUrl(encoded)).hostname.toLowerCase(); } catch { return \"\"; } }\n\n" +
       swSrc +
       '\n// Claim clients immediately so the SW controls the page without reload.\n' +
       'self.addEventListener("install", () => self.skipWaiting());\n' +
@@ -129,8 +131,9 @@ if (existsSync(uvSwPath)) {
       '  try {\n' +
       '    const url = new URL(req.url);\n' +
       '    const dest = req.destination;\n' +
-      '    // Drop ad-host sub-resource requests when adBlock is enabled.\n' +
-      '    if (_adBlockEnabled && dest !== "document" && dest !== "" && isAdHost(url.hostname)) {\n' +
+      '    const targetHost = luxTargetHost(req.url);\n' +
+      '    // Drop ad-host sub-resource requests using the actual destination, not Lux\'s hostname.\n' +
+      '    if (_adBlockEnabled && dest !== "document" && dest !== "" && isAdHost(targetHost)) {\n' +
       '      event.respondWith(new Response("", { status: 204 }));\n' +
       '      return;\n' +
       '    }\n' +
@@ -170,10 +173,13 @@ if (existsSync(uvSwPath)) {
       '  // Apply cosmetic CSS + privacy guard for HTML responses.\n' +
       '  if (!ct.includes("text/html")) return resp;\n' +
       '  var inject = "";\n' +
-      '  if (_adBlockEnabled) {\n' +
+      '  const targetHost = luxTargetHost(req.url);\n' +
+      '  const compatibilitySite = targetHost === "twitch.tv" || targetHost.endsWith(".twitch.tv") || targetHost === "roblox.com" || targetHost.endsWith(".roblox.com");\n' +
+      '  // Avoid DOM/event patches on Twitch and Roblox: they can break app hydration, login and media UI.\n' +
+      '  if (!compatibilitySite && _adBlockEnabled) {\n' +
       '    inject += "<style>" + cosmeticCss() + "</style>";\n' +
       '  }\n' +
-      '  if (_privacyGuardEnabled) {\n' +
+      '  if (!compatibilitySite && _privacyGuardEnabled) {\n' +
       '    inject += "<script>" + _privacyGuardScript + "<\\/script>";\n' +
       '  }\n' +
       '  if (!inject) return resp;\n' +
