@@ -104,6 +104,8 @@ async function loadUrl(input) {
 
   home.style.display = "none";
   player.style.display = "flex";
+  const priorError = $("tv-load-error");
+  if (priorError) priorError.style.display = "none";
   currentFrame = frame;
 
   // Use Lux's real proxy engine rather than /api/tv-proxy. The latter is a
