@@ -49,7 +49,7 @@ export const DEFAULTS = {
   // Extensions.
   clearUrls: true,           // strip tracking params from links
   adBlock: true,             // lightweight element/hostname blocking
-  privacyGuard: true,        // block behavioral tracking (focus/visibility/clipboard events)
+  privacyGuard: false,        // block behavioral tracking (focus/visibility/clipboard events)
   eventHandling: true,       // allow sites' event listeners (disable = freeze overlays)
   googleOptOut: true,        // set Google opt-out cookie
   killSwitch: true,          // halt traffic if the network changes until verified
