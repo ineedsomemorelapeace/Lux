@@ -14,7 +14,8 @@
     "test:e2e": "node tests/e2e/wisp-tunnel.test.js",
     "test:features": "node tests/features/harness.test.js",
     "test:browser": "node tests/browser/ui.test.mjs",
-    "test": "node tests/block-sim/evasion.test.js && node tests/vault/crypto.test.js && node tests/e2e/wisp-tunnel.test.js && node tests/features/harness.test.js"
+    "test": "node tests/block-sim/evasion.test.js && node tests/vault/crypto.test.js && node tests/e2e/wisp-tunnel.test.js && node tests/features/harness.test.js",
+    "prestart": "npm run build"
   },
   "engines": {
     "node": ">=18"
