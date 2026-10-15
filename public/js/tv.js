@@ -89,15 +89,81 @@ async function loadUrl(input) {
   const home = $("tv-home");
   const player = $("tv-player");
   const frame = $("tv-frame");
-  if (!input) return;
+  if (!input || !home || !player || !frame) return;
 
   let url = input.trim();
-  if (!url.startsWith("http://") && !url.startsWith("https://")) url = "https://" + url;
+  if (!/^https?:\/\//i.test(url)) url = "https://" + url;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("Only HTTP and HTTPS sites can be opened.");
+    url = parsed.href;
+  } catch (error) {
+    showTvError(error.message || "Enter a valid website address.");
+    return;
+  }
 
   home.style.display = "none";
   player.style.display = "flex";
   currentFrame = frame;
-  frame.src = "/api/tv-proxy?url=" + encodeURIComponent(url);
+
+  // Use Lux's real proxy engine rather than /api/tv-proxy. The latter is a
+  // single HTTP fetch and cannot carry a site's WebSockets, streaming media,
+  // client-side routing, or normal login/session flows (Twitch is a notable
+  // example). UV/Scramjet use the same Wisp transport as normal browser tabs.
+  frame.setAttribute("allow", "autoplay; fullscreen; encrypted-media; picture-in-picture; clipboard-read; clipboard-write");
+  frame.setAttribute("allowfullscreen", "");
+  frame.setAttribute("webkit-playsinline", "");
+  frame.setAttribute("playsinline", "");
+  frame.setAttribute("referrerpolicy", "no-referrer");
+
+  try {
+    const { getEngine, setTransportFor } = await import("./tab-nav.js");
+    const engine = getEngine();
+    await Promise.all([
+      setTransportFor(engine.name),
+      engine.init(),
+      navigator.serviceWorker?.ready.catch(() => {}),
+    ]);
+    // Safari can have an active registration without a controller on the
+    // first visit. Refuse to load a raw proxy path until control is available.
+    if ("serviceWorker" in navigator && !navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        let finished = false;
+        const finish = () => {
+          if (finished) return;
+          finished = true;
+          navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+          resolve();
+        };
+        const onChange = () => {
+          if (navigator.serviceWorker.controller) finish();
+        };
+        navigator.serviceWorker.addEventListener("controllerchange", onChange);
+        setTimeout(finish, 2500);
+      });
+    }
+    if ("serviceWorker" in navigator && !navigator.serviceWorker.controller) {
+      throw new Error("The proxy worker is not controlling this page yet. Reload Lux once, then try again.");
+    }
+    frame.src = engine.encode(url);
+  } catch (error) {
+    console.error("[lux] Live panel navigation failed:", error);
+    showTvError(error.message || "This site could not be started by the proxy engine.");
+  }
+}
+
+function showTvError(message) {
+  let status = $("tv-load-error");
+  if (!status) {
+    status = document.createElement("div");
+    status.id = "tv-load-error";
+    status.setAttribute("role", "status");
+    status.style.cssText = "padding:10px 12px;margin:8px 0;border:1px solid var(--line);border-radius:8px;color:var(--ink-soft);font-size:13px";
+    const player = $("tv-player");
+    if (player) player.prepend(status);
+  }
+  status.textContent = message;
+  status.style.display = "block";
 }
 
 // Add a custom app card
