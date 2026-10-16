@@ -39,28 +39,38 @@ function deleteDbWithTimeout(name) {
   });
 }
 
-// Wait until navigator.serviceWorker.controller is a SW whose script URL
-// contains the given marker (e.g. "uv.sw.js" or "sj.sw.js"). The controller
-// is what actually intercepts fetches for this page; .ready is not enough.
-// Times out after 8s (then proceeds — the navigation may still work after a
-// reload, and we don't want to hang forever).
-function waitForController(marker) {
-  return new Promise((resolve) => {
-    if (navigator.serviceWorker.controller) {
-      const url = navigator.serviceWorker.controller.scriptURL || "";
-      if (url.includes(marker)) return resolve();
-    }
-    let done = false;
-    const finish = () => { if (!done) { done = true; resolve(); } };
-    const handler = () => {
-      const c = navigator.serviceWorker.controller;
-      if (c && (c.scriptURL || "").includes(marker)) {
-        navigator.serviceWorker.removeEventListener("controllerchange", handler);
-        finish();
-      }
+// Wait until the expected service worker actually controls this page.
+// navigator.serviceWorker.ready only means a registration is active; it does
+// not guarantee that this page's requests are being intercepted. Fail loudly
+// on timeout instead of continuing in a partially initialized state.
+function waitForController(marker, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const matches = () => {
+      const controller = navigator.serviceWorker.controller;
+      return !!controller && (controller.scriptURL || "").includes(marker);
     };
-    navigator.serviceWorker.addEventListener("controllerchange", handler);
-    setTimeout(finish, 8000);
+    if (matches()) return resolve();
+
+    let timer;
+    const cleanup = () => {
+      navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+      clearTimeout(timer);
+    };
+    const onChange = () => {
+      if (!matches()) return;
+      cleanup();
+      resolve();
+    };
+
+    navigator.serviceWorker.addEventListener("controllerchange", onChange);
+    timer = setTimeout(() => {
+      cleanup();
+      const actual = navigator.serviceWorker.controller?.scriptURL || "none";
+      reject(new Error(
+        "Service worker did not take control within " + timeoutMs +
+        "ms (expected " + marker + "; current controller: " + actual + "). Reload the page and try again."
+      ));
+    }, timeoutMs);
   });
 }
 
@@ -121,11 +131,11 @@ const uv = {
     await waitForController("uv.sw.js");
     // After the SW claims the page, re-set the transport so the SW can
     // connect to the bare-mux SharedWorker with the new MessagePort.
-    try {
-      const proto = location.protocol === "https:" ? "wss" : "ws";
-      const wispUrl = proto + "://" + location.host + "/wisp/";
-      await setTransport("/epoxy/index.mjs", [{ wisp: wispUrl }]);
-    } catch (e) { console.warn("[lux] transport reset:", e); }
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const wispUrl = proto + "://" + location.host + "/wisp/";
+    // Transport setup is required for proxy requests. Let failures reject init()
+    // so the UI can show the real error rather than reporting a false success.
+    await setTransport("/epoxy/index.mjs", [{ wisp: wispUrl }]);
     return reg;
     });
   },
